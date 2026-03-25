@@ -1,0 +1,74 @@
+name: Scheduled Task
+
+on:
+  schedule:
+    # EDT (UTC-4): 11:00–22:00 UTC  (7am–6pm ET)
+    - cron: "* 11 * * 1-5"
+    - cron: "* 12 * * 1-5"
+    - cron: "* 13 * * 1-5"
+    - cron: "* 14 * * 1-5"
+    - cron: "* 15 * * 1-5"
+    - cron: "* 16 * * 1-5"
+    - cron: "* 17 * * 1-5"
+    - cron: "* 18 * * 1-5"
+    - cron: "* 19 * * 1-5"
+    - cron: "* 20 * * 1-5"
+    - cron: "* 21 * * 1-5"
+    - cron: "0 22 * * 1-5"
+
+    # EST (UTC-5): 12:00–23:00 UTC  (7am–6pm ET)
+    - cron: "* 12 * * 1-5"
+    - cron: "* 13 * * 1-5"
+    - cron: "* 14 * * 1-5"
+    - cron: "* 15 * * 1-5"
+    - cron: "* 16 * * 1-5"
+    - cron: "* 17 * * 1-5"
+    - cron: "* 18 * * 1-5"
+    - cron: "* 19 * * 1-5"
+    - cron: "* 20 * * 1-5"
+    - cron: "* 21 * * 1-5"
+    - cron: "* 22 * * 1-5"
+    - cron: "0 23 * * 1-5"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run
+        env:
+          GMAIL_ADDRESS:      ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_TO_EMAIL:     ${{ secrets.ALERT_TO_EMAIL }}
+          ALERT_TO_EMAILS:    ${{ secrets.ALERT_TO_EMAILS }}
+          ALERT_TO_SMS:       ${{ secrets.ALERT_TO_SMS }}
+          WATCH_LIST:         ${{ secrets.WATCH_LIST }}
+        run: python run.py
+
+      - name: Save state
+        run: |
+          git config user.name  "scheduled-task-bot"
+          git config user.email "actions@github.com"
+          git add data/known_products.json
+          git diff --cached --quiet || git commit -m "chore: update state [skip ci]"
+          git push
