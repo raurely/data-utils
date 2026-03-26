@@ -141,57 +141,20 @@ def fetch_products() -> list[dict]:
             []
         )
 
+    # ── DEBUG: log the full response structure so we can see exactly
+    # what the API returns and fix the parser accordingly.
+    import json as _json
+    log.info(f"  API response keys: {list(data.keys())}")
+    log.info(f"  Full API response (first 2000 chars):\n{_json.dumps(data)[:2000]}")
+
     if not result_list:
-        log.warning(f"  API returned no results. Response keys: {list(data.keys())}")
-        # Log a snippet to help debug the actual response shape
-        import json as _json
-        log.debug(f"  Response preview: {_json.dumps(data)[:500]}")
+        log.warning("  result_list is empty after all extraction attempts.")
         return []
 
-    for item in result_list:
-        # Oracle CC product fields vary — try common key names
-        attrs = item.get("attributes", item)
-        name  = (
-            attrs.get("product.displayName", [None])[0] or
-            attrs.get("displayName", "") or
-            attrs.get("name", "") or
-            item.get("displayName", "") or
-            item.get("name", "")
-        )
-        if isinstance(name, list):
-            name = name[0] if name else ""
-        name = str(name).strip()
-        if not name or len(name) < 3:
-            continue
+    log.info(f"  result_list has {len(result_list)} items. First item type: {type(result_list[0])}")
+    log.info(f"  First item preview: {_json.dumps(result_list[0] if isinstance(result_list[0], dict) else str(result_list[0]))[:500]}")
 
-        price = (
-            attrs.get("product.salePrice", [None])[0] or
-            attrs.get("salePrice", "") or
-            attrs.get("listPrice", "") or
-            ""
-        )
-        if isinstance(price, list):
-            price = price[0] if price else ""
-        price = f"${price}" if price and not str(price).startswith("$") else str(price)
-
-        sku = (
-            attrs.get("product.repositoryId", [None])[0] or
-            attrs.get("repositoryId", "") or
-            item.get("repositoryId", "")
-        )
-        if isinstance(sku, list):
-            sku = sku[0] if sku else ""
-        link = f"https://www.finewineandgoodspirits.com/product/{sku}" if sku else ""
-
-        products.append({
-            "name":   name,
-            "price":  str(price).strip(),
-            "link":   link,
-            "source": "Whiskey Release API",
-        })
-
-    log.info(f"  API returned {len(products)} products.")
-    return products
+    return []  # Return empty for now — we just need to see the structure
 
 def matches_watchlist(name: str) -> bool:
     if not WATCH_LIST:
