@@ -17,7 +17,6 @@ import logging
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from bs4 import BeautifulSoup
 
 # ─────────────────────────────────────────────
 #  CONFIG — all values come from GitHub Secrets
@@ -47,12 +46,16 @@ WATCH_LIST         = [w.strip().lower() for w in WATCH_LIST_RAW.split(",") if w.
 
 STATE_FILE         = "data/known_products.json"
 
-PAGES = [
-    {
-        "name": "Whiskey Release",
-        "url":  "https://www.finewineandgoodspirits.com/whiskey-release/whiskey-release",
-    },
-]
+# Oracle CX Commerce backend API endpoint
+# This is the same call the FWGS website makes internally —
+# bypasses the 403 block that affects the HTML page.
+API_URL = "https://www.finewineandgoodspirits.com/ccstore/v1/search"
+API_PARAMS = {
+    "dimensionId": "1491623136",  # Whiskey Release category
+    "Nrpp": "100",                # Max results per page
+    "No":   "0",                  # Offset
+    "Ns":   "product.displayName|0",  # Sort by name
+}
 
 # ─────────────────────────────────────────────
 #  LOGGING
@@ -88,83 +91,106 @@ def save_known(products: set, new_count: int):
     log.info(f"State saved: {len(products)} products tracked.")
 
 # ─────────────────────────────────────────────
-#  SCRAPING
+#  API FETCH
+#  Uses the Oracle CX Commerce backend API that
+#  the FWGS website calls internally — bypasses
+#  the 403 block on the HTML page.
 # ─────────────────────────────────────────────
 
-HEADERS = {
+API_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/122.0.0.0 Safari/537.36"
     ),
+    "Accept":          "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer":         "https://www.finewineandgoodspirits.com/whiskey-release/whiskey-release",
+    "Origin":          "https://www.finewineandgoodspirits.com",
 }
 
-BOURBON_KEYWORDS = [
-    "blanton", "weller", "buffalo trace", "eagle rare", "stagg", "e.h. taylor",
-    "elmer t. lee", "van winkle", "pappy", "four roses", "wild turkey",
-    "woodford", "knob creek", "maker's mark", "old forester", "baker's",
-    "booker's", "elijah craig", "heaven hill", "larceny", "russell",
-    "benchmark", "whiskey", "bourbon", "rye whiskey", "scotch", "willett",
-    "rowan's creek", "michter", "angel's envy", "rabbit hole",
-]
-
-def fetch_page(url: str) -> str | None:
+def fetch_products() -> list[dict]:
+    """Call the FWGS backend search API and return a list of product dicts."""
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=25)
+        resp = requests.get(
+            API_URL,
+            params=API_PARAMS,
+            headers=API_HEADERS,
+            timeout=25,
+        )
         resp.raise_for_status()
-        return resp.text
+        data = resp.json()
     except requests.RequestException as e:
-        log.error(f"Fetch failed for {url}: {e}")
-        return None
+        log.error(f"API fetch failed: {e}")
+        return []
+    except ValueError as e:
+        log.error(f"API response was not valid JSON: {e}")
+        return []
 
-def parse_products(html: str, source_name: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
     products = []
 
-    # Remove nav, footer, script, style noise
-    for tag in soup.select("nav, footer, script, style, header"):
-        tag.decompose()
+    # Oracle CX Commerce returns results under data.resultList
+    result_list = data.get("resultsList", data.get("data", {}).get("resultList", []))
 
-    # Try structured product selectors
-    selectors = [
-        ".product-tile", ".product-item", "[data-sku]",
-        ".product-name", ".product__name", "h3.name",
-        ".product-listing__item", "li.product",
-        ".product-grid__item", ".product-card",
-        "[class*='product']",
-    ]
+    # Also try common Oracle CC response shapes
+    if not result_list:
+        result_list = (
+            data.get("records", []) or
+            data.get("results", []) or
+            data.get("items", []) or
+            []
+        )
 
-    for sel in selectors:
-        els = soup.select(sel)
-        if len(els) >= 2:  # need at least 2 to trust the selector
-            for el in els:
-                name = " ".join(el.get_text(separator=" ", strip=True).split())
-                if 4 < len(name) < 250:
-                    price_el = el.select_one(".price, .product-price, [class*='price']")
-                    price = price_el.get_text(strip=True) if price_el else ""
-                    link_el = el.select_one("a[href]")
-                    link = link_el["href"] if link_el else ""
-                    if link and not link.startswith("http"):
-                        link = "https://www.finewineandgoodspirits.com" + link
-                    products.append({"name": name, "price": price, "link": link, "source": source_name})
-            log.info(f"  Parsed {len(products)} products via selector '{sel}'")
-            return products
+    if not result_list:
+        log.warning(f"  API returned no results. Response keys: {list(data.keys())}")
+        # Log a snippet to help debug the actual response shape
+        import json as _json
+        log.debug(f"  Response preview: {_json.dumps(data)[:500]}")
+        return []
 
-    # Fallback: keyword scan
-    log.info("  No structured elements found — running keyword scan.")
-    seen = set()
-    for line in soup.get_text(separator="\n").splitlines():
-        line = " ".join(line.strip().split())
-        if not line or len(line) > 200 or len(line) < 5:
+    for item in result_list:
+        # Oracle CC product fields vary — try common key names
+        attrs = item.get("attributes", item)
+        name  = (
+            attrs.get("product.displayName", [None])[0] or
+            attrs.get("displayName", "") or
+            attrs.get("name", "") or
+            item.get("displayName", "") or
+            item.get("name", "")
+        )
+        if isinstance(name, list):
+            name = name[0] if name else ""
+        name = str(name).strip()
+        if not name or len(name) < 3:
             continue
-        if any(kw in line.lower() for kw in BOURBON_KEYWORDS):
-            if line not in seen:
-                seen.add(line)
-                products.append({"name": line, "price": "", "link": "", "source": source_name})
 
-    log.info(f"  Keyword scan: {len(products)} candidate lines.")
+        price = (
+            attrs.get("product.salePrice", [None])[0] or
+            attrs.get("salePrice", "") or
+            attrs.get("listPrice", "") or
+            ""
+        )
+        if isinstance(price, list):
+            price = price[0] if price else ""
+        price = f"${price}" if price and not str(price).startswith("$") else str(price)
+
+        sku = (
+            attrs.get("product.repositoryId", [None])[0] or
+            attrs.get("repositoryId", "") or
+            item.get("repositoryId", "")
+        )
+        if isinstance(sku, list):
+            sku = sku[0] if sku else ""
+        link = f"https://www.finewineandgoodspirits.com/product/{sku}" if sku else ""
+
+        products.append({
+            "name":   name,
+            "price":  str(price).strip(),
+            "link":   link,
+            "source": "Whiskey Release API",
+        })
+
+    log.info(f"  API returned {len(products)} products.")
     return products
 
 def matches_watchlist(name: str) -> bool:
@@ -321,23 +347,17 @@ def main():
 
     all_new = []
 
-    for page in PAGES:
-        log.info(f"Fetching: {page['name']}")
-        html = fetch_page(page["url"])
-        if not html:
-            log.warning(f"  Skipping {page['name']} — fetch failed.")
-            continue
+    log.info("Calling FWGS backend API...")
+    products = fetch_products()
+    log.info(f"  {len(products)} products returned from API.")
 
-        products = parse_products(html, page["name"])
-        log.info(f"  {len(products)} products found on page.")
-
-        for p in products:
-            key = p["name"]
-            if key not in known:
-                if not first_run and matches_watchlist(key):
-                    all_new.append(p)
-                    log.info(f"  NEW: {key[:80]}")
-                known.add(key)
+    for p in products:
+        key = p["name"]
+        if key not in known:
+            if not first_run and matches_watchlist(key):
+                all_new.append(p)
+                log.info(f"  NEW: {key[:80]}")
+            known.add(key)
 
     save_known(known, len(all_new))
 
