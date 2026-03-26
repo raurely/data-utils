@@ -141,20 +141,48 @@ def fetch_products() -> list[dict]:
             []
         )
 
-    # ── DEBUG: log the full response structure so we can see exactly
-    # what the API returns and fix the parser accordingly.
-    import json as _json
-    log.info(f"  API response keys: {list(data.keys())}")
-    log.info(f"  Full API response (first 2000 chars):\n{_json.dumps(data)[:2000]}")
+    # resultsList is a dict with a "records" list inside
+    # Each record has a nested "records" list containing the SKU-level record
+    # which holds an "attributes" dict with product fields.
+    records = data.get("resultsList", {}).get("records", [])
 
-    if not result_list:
-        log.warning("  result_list is empty after all extraction attempts.")
+    if not records:
+        log.warning("  API returned no records.")
         return []
 
-    log.info(f"  result_list has {len(result_list)} items. First item type: {type(result_list[0])}")
-    log.info(f"  First item preview: {_json.dumps(result_list[0] if isinstance(result_list[0], dict) else str(result_list[0]))[:500]}")
+    for group in records:
+        # Each group record contains nested SKU records
+        sku_records = group.get("records", [group])
+        for sku in sku_records:
+            attrs = sku.get("attributes", {})
 
-    return []  # Return empty for now — we just need to see the structure
+            # Product name
+            name_val = attrs.get("product.displayName", attrs.get("sku.displayName", [""]))
+            name = name_val[0] if isinstance(name_val, list) else str(name_val)
+            name = name.strip()
+            if not name or len(name) < 3:
+                continue
+
+            # Price
+            price_val = attrs.get("sku.activePrice", attrs.get("product.salePrice", attrs.get("sku.listPrice", [""])))
+            price = price_val[0] if isinstance(price_val, list) else str(price_val)
+            price = f"${price}" if price and not str(price).startswith("$") else str(price)
+
+            # SKU / link
+            sku_val = attrs.get("product.repositoryId", attrs.get("sku.repositoryId", [""]))
+            sku_id = sku_val[0] if isinstance(sku_val, list) else str(sku_val)
+            link = f"https://www.finewineandgoodspirits.com/product/{sku_id}" if sku_id else ""
+
+            products.append({
+                "name":   name,
+                "price":  price.strip(),
+                "link":   link,
+                "source": "Whiskey Release API",
+            })
+            break  # One SKU per product group is enough
+
+    log.info(f"  Parsed {len(products)} products from API.")
+    return products
 
 def matches_watchlist(name: str) -> bool:
     if not WATCH_LIST:
